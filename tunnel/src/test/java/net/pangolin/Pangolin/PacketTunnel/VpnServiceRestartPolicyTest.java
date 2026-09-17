@@ -17,15 +17,42 @@ public class VpnServiceRestartPolicyTest {
     }
 
     @Test
-    public void explicitManualActionIsNotAPlatformStartOnLegacyAndroid() {
-        assertFalse(VpnServiceRestartPolicy.isSystemStartOnLegacy(
+    public void explicitManualActionIsNotAPlatformStart() {
+        assertFalse(VpnServiceRestartPolicy.isSystemStart(
                 VpnServiceRestartPolicy.ACTION_MANUAL_START));
     }
 
     @Test
-    public void missingOrDifferentActionIsAPlatformStartOnLegacyAndroid() {
-        assertTrue(VpnServiceRestartPolicy.isSystemStartOnLegacy(null));
-        assertTrue(VpnServiceRestartPolicy.isSystemStartOnLegacy("other"));
+    public void onlySystemActionOrStickyRestartIsAPlatformStart() {
+        assertTrue(VpnServiceRestartPolicy.isSystemStart(null));
+        assertTrue(VpnServiceRestartPolicy.isSystemStart("android.net.VpnService"));
+        assertFalse(VpnServiceRestartPolicy.isSystemStart("other"));
+    }
+
+    @Test
+    public void systemStartBootstrapsBeforeAndroidReportsEstablishedOwnership() {
+        assertTrue(VpnServiceRestartPolicy.resolveStartOwnership(
+                false, "android.net.VpnService", false, false));
+        assertTrue(VpnServiceRestartPolicy.resolveStartOwnership(
+                false, null, false, false));
+    }
+
+    @Test
+    public void manualStartDoesNotAcquireOwnershipWithoutPlatformEvidence() {
+        assertFalse(VpnServiceRestartPolicy.resolveStartOwnership(
+                false, VpnServiceRestartPolicy.ACTION_MANUAL_START, false, false));
+        assertFalse(VpnServiceRestartPolicy.resolveStartOwnership(
+                false, "other", false, false));
+        assertTrue(VpnServiceRestartPolicy.resolveStartOwnership(
+                false, VpnServiceRestartPolicy.ACTION_MANUAL_START, true, true));
+    }
+
+    @Test
+    public void bootstrapLatchSurvivesManualRetryUntilPlatformStateIsKnown() {
+        assertTrue(VpnServiceRestartPolicy.resolveStartOwnership(
+                true, VpnServiceRestartPolicy.ACTION_MANUAL_START, false, false));
+        assertFalse(VpnServiceRestartPolicy.resolveStartOwnership(
+                true, VpnServiceRestartPolicy.ACTION_MANUAL_START, true, false));
     }
 
     @Test

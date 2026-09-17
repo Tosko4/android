@@ -11,12 +11,36 @@ import net.pangolin.Pangolin.PacketTunnel.GoBackend
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VpnServiceLifecycleTest {
+    @Test
+    fun systemStartRetainsOwnershipBeforeAnyTunnelIsEstablished() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assumeTrue("VPN consent is required", VpnService.prepare(context) == null)
+        val runtime = (context as PangolinApplication).runtime
+        assumeTrue("Run on a fresh test installation without an account", runtime.accountManager.accounts.isEmpty())
+        val intent = Intent(context, GoBackend.VpnService::class.java)
+            .setAction(VpnService.SERVICE_INTERFACE)
+
+        // Deliver the same action Android uses for Always-On. With no stored account,
+        // no interface can be established, so platform isAlwaysOn() remains false.
+        ContextCompat.startForegroundService(context, intent)
+        try {
+            val backend = GoBackend(context)
+            waitUntil { runCatching { backend.isAlwaysOn }.getOrDefault(false) }
+            assertTrue(backend.isAlwaysOn)
+            assertFalse(runtime.tunnelManager.tunnelState.value.isServiceRunning)
+            assertFalse(kotlinx.coroutines.runBlocking { runtime.disconnectFromUser() })
+        } finally {
+            context.stopService(intent)
+        }
+    }
+
     @Test
     fun manualServiceStartsWithoutAnActivityAndCreatesItsNotificationChannel() {
         val context = ApplicationProvider.getApplicationContext<Context>()

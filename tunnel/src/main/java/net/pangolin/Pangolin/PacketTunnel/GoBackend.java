@@ -51,7 +51,7 @@ public final class GoBackend implements Backend {
     @Nullable private SystemDnsMonitor systemDnsMonitor;
     @Nullable private ParcelFileDescriptor currentTunFd;
     private final AtomicBoolean networkSettingsApplied = new AtomicBoolean(false);
-    private boolean tunnelActive = false;
+    private volatile boolean tunnelActive = false;
 
     /**
      * Public constructor for GoBackend.
@@ -407,8 +407,7 @@ public final class GoBackend implements Backend {
      */
     @Override
     public boolean isAlwaysOn() throws ExecutionException, InterruptedException, TimeoutException {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-                vpnService.get(0, TimeUnit.NANOSECONDS).isAlwaysOn();
+        return vpnService.get(0, TimeUnit.NANOSECONDS).isAlwaysOnOwned();
     }
 
     /**
@@ -589,6 +588,11 @@ public final class GoBackend implements Backend {
            startNetworkSettingsPolling(tunnel.getName());
 
        } else {
+           // Reconcile ownership while the interface still exists. A subsequent false
+           // isAlwaysOn() result after teardown cannot distinguish disable from recovery.
+           final VpnService previousService = vpnService.getNow(null);
+           final boolean retainAlwaysOnService = previousService != null && previousService.isAlwaysOnOwned();
+
            // Always attempt to stop, even if tunnelActive is false
            // This ensures VPN service cleanup if tunnel didn't fully start
            if (!tunnelActive) {
@@ -619,8 +623,13 @@ public final class GoBackend implements Backend {
            // Stop the VPN service - give it time to start if it hasn't yet
            try {
                final VpnService service = vpnService.get(2, TimeUnit.SECONDS);
-               Log.i(TAG, "Stopping VPN service");
-               service.stopSelf();
+               if (service == previousService && retainAlwaysOnService && service.isAlwaysOnOwned()) {
+                   Log.i(TAG, "Keeping Always-On VPN service alive while rebuilding tunnel");
+                   service.updateForegroundNotification(false);
+               } else {
+                   Log.i(TAG, "Stopping VPN service");
+                   service.stopSelf();
+               }
            } catch (final TimeoutException e) {
                Log.w(TAG, "VPN service not available when trying to stop, may not have started yet");
                // Try to stop the service directly via context if it exists
@@ -653,13 +662,13 @@ public final class GoBackend implements Backend {
         private static final String TAG = "VpnService/PowerState";
         private static final String NOTIFICATION_CHANNEL_ID = "pangolin_vpn";
         private static final int NOTIFICATION_ID = 1001;
-        @Nullable private GoBackend owner;
+        @Nullable private volatile GoBackend owner;
         @Nullable private PowerManager powerManager;
         private boolean isReceiverRegistered = false;
         private boolean isInDozeMode = false;
         private boolean isInPowerSaveMode = false;
-        private boolean alwaysOnOwned = false;
-        private boolean ownershipRevoked = false;
+        private volatile boolean alwaysOnOwned = false;
+        private volatile boolean ownershipRevoked = false;
 
         private final BroadcastReceiver powerStateReceiver = new BroadcastReceiver() {
             @Override
@@ -694,10 +703,7 @@ public final class GoBackend implements Backend {
 
         @Override
         public void onDestroy() {
-            final boolean canQueryPlatformOwnership = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q;
-            final boolean platformAlwaysOn = canQueryPlatformOwnership && isAlwaysOn();
-            final boolean retainAlwaysOn = VpnServiceRestartPolicy.resolveOwnership(
-                    alwaysOnOwned, canQueryPlatformOwnership, platformAlwaysOn, ownershipRevoked);
+            final boolean retainAlwaysOn = isAlwaysOnOwned();
 
             // Stop power state monitoring
             stopPowerStateMonitoring();
@@ -723,7 +729,7 @@ public final class GoBackend implements Backend {
             if (alwaysOnCallback != null) {
                 if (retainAlwaysOn)
                     alwaysOnCallback.alwaysOnTriggered();
-                else if (alwaysOnOwned)
+                else
                     alwaysOnCallback.alwaysOnStopped();
             }
         }
@@ -732,17 +738,19 @@ public final class GoBackend implements Backend {
         public int onStartCommand(@Nullable final Intent intent, final int flags, final int startId) {
             vpnService.complete(this);
             ownershipRevoked = false;
-            final boolean systemStart = VpnServiceRestartPolicy.isSystemStartOnLegacy(
-                    intent == null ? null : intent.getAction());
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-                alwaysOnOwned = isAlwaysOn();
-            else
-                alwaysOnOwned = systemStart;
+            final boolean platformAlwaysOn = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isAlwaysOn();
+            alwaysOnOwned = VpnServiceRestartPolicy.resolveStartOwnership(
+                    alwaysOnOwned,
+                    intent == null ? null : intent.getAction(),
+                    platformAlwaysOn || canQueryEstablishedOwnership(),
+                    platformAlwaysOn);
 
             if (alwaysOnOwned) {
                 Log.d(TAG, "Service started by Always-on VPN feature");
                 if (alwaysOnCallback != null)
                     alwaysOnCallback.alwaysOnTriggered();
+            } else if (alwaysOnCallback != null) {
+                alwaysOnCallback.alwaysOnStopped();
             }
             return VpnServiceRestartPolicy.shouldRestartAfterProcessDeath(alwaysOnOwned) ?
                     START_STICKY : START_NOT_STICKY;
@@ -798,7 +806,21 @@ public final class GoBackend implements Backend {
         }
 
         boolean isAlwaysOnOwned() {
+            final boolean platformAlwaysOn = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isAlwaysOn();
+            alwaysOnOwned = VpnServiceRestartPolicy.resolveOwnership(
+                    alwaysOnOwned,
+                    platformAlwaysOn || canQueryEstablishedOwnership(),
+                    platformAlwaysOn,
+                    ownershipRevoked);
             return alwaysOnOwned;
+        }
+
+        private boolean canQueryEstablishedOwnership() {
+            // Android's isAlwaysOn() checks the owner of an *established* VPN.
+            // Before establish(), false means "not established", not "Always-On disabled".
+            // Preserve the system-start latch during bootstrap and tunnel reconstruction;
+            // once up, the platform can authoritatively report enable/disable changes.
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && owner != null && owner.tunnelActive;
         }
 
         public void setOwner(final GoBackend owner) {

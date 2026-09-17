@@ -11,8 +11,19 @@ final class VpnServiceRestartPolicy {
         return alwaysOnOwned;
     }
 
-    static boolean isSystemStartOnLegacy(final String action) {
-        return !ACTION_MANUAL_START.equals(action);
+    static boolean isSystemStart(final String action) {
+        // Android starts Always-On with SERVICE_INTERFACE, or a null intent when
+        // recreating our sticky service. All app-initiated starts have an explicit action.
+        return action == null || "android.net.VpnService".equals(action);
+    }
+
+    static boolean resolveStartOwnership(
+            final boolean previouslyOwned,
+            final String action,
+            final boolean platformStateKnown,
+            final boolean platformAlwaysOn) {
+        return isSystemStart(action) || resolveOwnership(
+                previouslyOwned, platformStateKnown, platformAlwaysOn, false);
     }
 
     static boolean resolveOwnership(
