@@ -889,7 +889,7 @@ class MainActivity : BaseNavigationActivity() {
             val statusText = when {
                 newState.errorMessage != null -> "Error"
                 newState.isFullyConnected -> "Connected"
-                newState.isRegistered -> "Preparing private routes"
+                newState.isRegistered -> "Registering"
                 newState.isSocketConnected && !newState.isRegistered -> "Registering"
                 newState.isServiceRunning && !newState.isSocketConnected -> "Connecting"
                 newState.isConnecting -> "Connecting"

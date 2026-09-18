@@ -162,7 +162,7 @@ class TunnelManager private constructor(
             !status.connected -> "Connecting..."
             status.registered != true -> "Registering..."
             state.isFullyConnected -> "Connected"
-            status.connected && status.registered == true -> "Preparing private routes..."
+            status.connected && status.registered == true -> "Registering..."
             else -> "Unknown"
         }
     }
