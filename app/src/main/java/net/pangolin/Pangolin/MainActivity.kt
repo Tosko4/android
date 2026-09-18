@@ -822,7 +822,8 @@ class MainActivity : BaseNavigationActivity() {
     }
 
     private fun requestNotificationPermissionAndConnect() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        if (configManager.config.value.persistentVpnNotification &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
             android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {

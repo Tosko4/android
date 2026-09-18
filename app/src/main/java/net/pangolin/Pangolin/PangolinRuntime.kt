@@ -185,6 +185,14 @@ class PangolinRuntime(private val context: Context) {
     )
 
     init {
+        // Apply the saved choice before a system-started service is created, and
+        // update a running service without reconnecting when the preference changes.
+        GoBackend.setPersistentNotificationEnabled(configManager.config.value.persistentVpnNotification)
+        scope.launch {
+            configManager.config.collectLatest { config ->
+                GoBackend.setPersistentNotificationEnabled(config.persistentVpnNotification)
+            }
+        }
         authManager.tunnelManager = tunnelManager
         authManager.requestUserDisconnect = { disconnectFromUser() }
         GoBackend.setAlwaysOnCallback(object : GoBackend.AlwaysOnCallback {

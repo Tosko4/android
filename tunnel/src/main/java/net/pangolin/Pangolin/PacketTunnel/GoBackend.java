@@ -15,6 +15,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
+import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
 import android.util.Log;
@@ -44,6 +45,7 @@ public final class GoBackend implements Backend {
     private static final String TAG = "WireGuard/GoBackend";
     @Nullable private static AlwaysOnCallback alwaysOnCallback;
     private static CompletableFuture<VpnService> vpnService = new CompletableFuture<>();
+    private static volatile boolean persistentNotificationEnabled = false;
     private final Context context;
     @Nullable private Tunnel currentTunnel;
     @Nullable private TunnelConfig currentConfig;
@@ -78,6 +80,13 @@ public final class GoBackend implements Backend {
         final VpnService service = vpnService.getNow(null);
         if (service != null)
             service.updateForegroundNotification(connected);
+    }
+
+    public static void setPersistentNotificationEnabled(final boolean enabled) {
+        persistentNotificationEnabled = enabled;
+        final VpnService service = vpnService.getNow(null);
+        if (service != null)
+            service.refreshForegroundNotification();
     }
 
     private static native String initOlm(String configJSON);
@@ -592,6 +601,8 @@ public final class GoBackend implements Backend {
            // isAlwaysOn() result after teardown cannot distinguish disable from recovery.
            final VpnService previousService = vpnService.getNow(null);
            final boolean retainAlwaysOnService = previousService != null && previousService.isAlwaysOnOwned();
+           if (retainAlwaysOnService)
+               previousService.updateForegroundNotification(false);
 
            // Always attempt to stop, even if tunnelActive is false
            // This ensures VPN service cleanup if tunnel didn't fully start
@@ -669,6 +680,9 @@ public final class GoBackend implements Backend {
         private boolean isInPowerSaveMode = false;
         private volatile boolean alwaysOnOwned = false;
         private volatile boolean ownershipRevoked = false;
+        private boolean notificationConnected = false;
+        private boolean systemBound = false;
+        private boolean notificationStopped = false;
 
         private final BroadcastReceiver powerStateReceiver = new BroadcastReceiver() {
             @Override
@@ -703,6 +717,9 @@ public final class GoBackend implements Backend {
 
         @Override
         public void onDestroy() {
+            synchronized (this) {
+                notificationStopped = true;
+            }
             final boolean retainAlwaysOn = isAlwaysOnOwned();
 
             // Stop power state monitoring
@@ -758,6 +775,9 @@ public final class GoBackend implements Backend {
 
         @Override
         public void onRevoke() {
+            synchronized (this) {
+                notificationStopped = true;
+            }
             ownershipRevoked = true;
             alwaysOnOwned = false;
             if (alwaysOnCallback != null)
@@ -766,7 +786,39 @@ public final class GoBackend implements Backend {
             super.onRevoke();
         }
 
-        private void updateForegroundNotification(final boolean connected) {
+        @Override
+        public synchronized IBinder onBind(final Intent intent) {
+            final IBinder binder = super.onBind(intent);
+            if (binder != null) {
+                systemBound = true;
+                refreshForegroundNotification();
+            }
+            return binder;
+        }
+
+        @Override
+        public synchronized boolean onUnbind(final Intent intent) {
+            systemBound = false;
+            notificationConnected = false;
+            refreshForegroundNotification();
+            return super.onUnbind(intent);
+        }
+
+        private synchronized void updateForegroundNotification(final boolean connected) {
+            notificationConnected = connected;
+            refreshForegroundNotification();
+        }
+
+        private synchronized void refreshForegroundNotification() {
+            if (notificationStopped) return;
+            if (!VpnNotificationPolicy.needsForegroundNotification(
+                    persistentNotificationEnabled, notificationConnected, systemBound)) {
+                // establish() binds VpnService from Android with BIND_AUTO_CREATE |
+                // BIND_FOREGROUND_SERVICE. Keep that VPN/binding intact; remove only
+                // our optional persistent notification and explicit foreground state.
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                return;
+            }
             final NotificationManager manager = getSystemService(NotificationManager.class);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && manager != null) {
                 manager.createNotificationChannel(new NotificationChannel(
@@ -786,7 +838,7 @@ public final class GoBackend implements Backend {
                     new Notification.Builder(this);
             builder.setSmallIcon(R.drawable.ic_vpn_lock)
                     .setContentTitle(getString(R.string.vpn_notification_title))
-                    .setContentText(getString(connected ?
+                    .setContentText(getString(notificationConnected ?
                             R.string.vpn_notification_connected :
                             R.string.vpn_notification_connecting))
                     .setCategory(Notification.CATEGORY_SERVICE)
